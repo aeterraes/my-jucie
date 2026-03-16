@@ -1,0 +1,29 @@
+name: Semgrep Scan
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Semgrep
+        uses: returntocorp/semgrep-action@v2
+        with:
+          config: auto
+          output: semgrep-report.json
+          format: json
+
+      - name: Upload Semgrep report
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
