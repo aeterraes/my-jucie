@@ -1,14 +1,7 @@
-/*
- * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
- * SPDX-License-Identifier: MIT
- */
-
 import os from 'node:os'
-import fs from 'node:fs'
-import vm from 'node:vm'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import yaml from 'js-yaml'
-import libxml from 'libxmljs2'
 import unzipper from 'unzipper'
 import { type NextFunction, type Request, type Response } from 'express'
 
@@ -16,126 +9,93 @@ import * as challengeUtils from '../lib/challengeUtils'
 import { challenges } from '../data/datacache'
 import * as utils from '../lib/utils'
 
-function ensureFileIsPassed ({ file }: Request, res: Response, next: NextFunction) {
-  if (file != null) {
-    next()
-  } else {
-    return res.status(400).json({ error: 'File is not passed' })
-  }
+// Проверка, что файл передан
+function ensureFileIsPassed({ file }: Request, res: Response, next: NextFunction) {
+  if (file != null) next()
+  else res.status(400).json({ error: 'File is not passed' })
 }
 
-function handleZipFileUpload ({ file }: Request, res: Response, next: NextFunction) {
-  if (utils.endsWith(file?.originalname.toLowerCase(), '.zip')) {
-    if (((file?.buffer) != null) && utils.isChallengeEnabled(challenges.fileWriteChallenge)) {
-      const buffer = file.buffer
-      const filename = file.originalname.toLowerCase()
-      const tempFile = path.join(os.tmpdir(), filename)
-      fs.open(tempFile, 'w', function (err, fd) {
-        if (err != null) { next(err) }
-        fs.write(fd, buffer, 0, buffer.length, null, function (err) {
-          if (err != null) { next(err) }
-          fs.close(fd, function () {
-            fs.createReadStream(tempFile)
-              .pipe(unzipper.Parse())
-              .on('entry', function (entry: any) {
-                const fileName = entry.path
-                const absolutePath = path.resolve('uploads/complaints/' + fileName)
-                challengeUtils.solveIf(challenges.fileWriteChallenge, () => { return absolutePath === path.resolve('ftp/legal.md') })
-                if (absolutePath.includes(path.resolve('.'))) {
-                  entry.pipe(fs.createWriteStream('uploads/complaints/' + fileName).on('error', function (err) { next(err) }))
-                } else {
-                  entry.autodrain()
-                }
-              }).on('error', function (err: unknown) { next(err) })
-          })
-        })
-      })
-    }
-    res.status(204).end()
-  } else {
-    next()
-  }
-}
+// Безопасная функция для zip
+async function handleZipFileUpload({ file }: Request, res: Response, next: NextFunction) {
+  if (!file || !file.originalname.toLowerCase().endsWith('.zip')) return next()
 
-function checkUploadSize ({ file }: Request, res: Response, next: NextFunction) {
-  if (file != null) {
-    challengeUtils.solveIf(challenges.uploadSizeChallenge, () => { return file?.size > 100000 })
-  }
-  next()
-}
+  if (!utils.isChallengeEnabled(challenges.fileWriteChallenge)) return res.status(204).end()
 
-function checkFileType ({ file }: Request, res: Response, next: NextFunction) {
-  const fileType = file?.originalname.substr(file.originalname.lastIndexOf('.') + 1).toLowerCase()
-  challengeUtils.solveIf(challenges.uploadTypeChallenge, () => {
-    return !(fileType === 'pdf' || fileType === 'xml' || fileType === 'zip' || fileType === 'yml' || fileType === 'yaml')
-  })
-  next()
-}
+  try {
+    const filename = path.basename(file.originalname.toLowerCase())
+    const tempFile = path.join(os.tmpdir(), filename)
+    await fs.writeFile(tempFile, file.buffer)
 
-function handleXmlUpload ({ file }: Request, res: Response, next: NextFunction) {
-  if (utils.endsWith(file?.originalname.toLowerCase(), '.xml')) {
-    challengeUtils.solveIf(challenges.deprecatedInterfaceChallenge, () => { return true })
-    if (((file?.buffer) != null) && utils.isChallengeEnabled(challenges.deprecatedInterfaceChallenge)) { // XXE attacks in Docker/Heroku containers regularly cause "segfault" crashes
-      const data = file.buffer.toString()
-      try {
-        const sandbox = { libxml, data }
-        vm.createContext(sandbox)
-        const xmlDoc = vm.runInContext('libxml.parseXml(data, { noblanks: true, noent: true, nocdata: true })', sandbox, { timeout: 2000 })
-        const xmlString = xmlDoc.toString(false)
-        challengeUtils.solveIf(challenges.xxeFileDisclosureChallenge, () => { return (utils.matchesEtcPasswdFile(xmlString) || utils.matchesSystemIniFile(xmlString)) })
-        res.status(410)
-        next(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + utils.trunc(xmlString, 400) + ' (' + file.originalname + ')'))
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err)
-        if (utils.contains(errorMessage, 'Script execution timed out')) {
-          if (challengeUtils.notSolved(challenges.xxeDosChallenge)) {
-            challengeUtils.solve(challenges.xxeDosChallenge)
-          }
-          res.status(503)
-          next(new Error('Sorry, we are temporarily not available! Please try again later.'))
-        } else {
-          res.status(410)
-          next(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + errorMessage + ' (' + file.originalname + ')'))
-        }
+    const directory = path.resolve('uploads/complaints/')
+    await fs.mkdir(directory, { recursive: true })
+
+    const directorySafe = (filePath: string) => filePath.startsWith(directory)
+
+    const zipStream = fs.createReadStream(tempFile).pipe(unzipper.Parse())
+    zipStream.on('entry', async entry => {
+      const fileName = path.basename(entry.path)
+      const absolutePath = path.resolve(directory, fileName)
+      challengeUtils.solveIf(challenges.fileWriteChallenge, () => absolutePath === path.resolve('ftp/legal.md'))
+
+      if (directorySafe(absolutePath)) {
+        entry.pipe(fs.createWriteStream(absolutePath))
+      } else {
+        entry.autodrain()
       }
-    } else {
-      res.status(410)
-      next(new Error('B2B customer complaints via file upload have been deprecated for security reasons (' + file?.originalname + ')'))
-    }
+    })
+    zipStream.on('error', err => next(err))
+    zipStream.on('close', () => res.status(204).end())
+
+  } catch (err) {
+    next(err)
+  }
+}
+
+// Проверка размера файла
+function checkUploadSize({ file }: Request, res: Response, next: NextFunction) {
+  if (file != null) {
+    challengeUtils.solveIf(challenges.uploadSizeChallenge, () => file.size > 100_000)
   }
   next()
 }
 
-function handleYamlUpload ({ file }: Request, res: Response, next: NextFunction) {
-  if (utils.endsWith(file?.originalname.toLowerCase(), '.yml') || utils.endsWith(file?.originalname.toLowerCase(), '.yaml')) {
-    challengeUtils.solveIf(challenges.deprecatedInterfaceChallenge, () => { return true })
-    if (((file?.buffer) != null) && utils.isChallengeEnabled(challenges.deprecatedInterfaceChallenge)) {
-      const data = file.buffer.toString()
-      try {
-        const sandbox = { yaml, data }
-        vm.createContext(sandbox)
-        const yamlString = vm.runInContext('JSON.stringify(yaml.load(data))', sandbox, { timeout: 2000 })
-        res.status(410)
-        next(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + utils.trunc(yamlString, 400) + ' (' + file.originalname + ')'))
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err)
-        if (utils.contains(errorMessage, 'Invalid string length') || utils.contains(errorMessage, 'Script execution timed out')) {
-          if (challengeUtils.notSolved(challenges.yamlBombChallenge)) {
-            challengeUtils.solve(challenges.yamlBombChallenge)
-          }
-          res.status(503)
-          next(new Error('Sorry, we are temporarily not available! Please try again later.'))
-        } else {
-          res.status(410)
-          next(new Error('B2B customer complaints via file upload have been deprecated for security reasons: ' + errorMessage + ' (' + file.originalname + ')'))
-        }
-      }
-    } else {
-      res.status(410)
-      next(new Error('B2B customer complaints via file upload have been deprecated for security reasons (' + file?.originalname + ')'))
+// Проверка типа файла
+function checkFileType({ file }: Request, res: Response, next: NextFunction) {
+  if (!file) return next()
+  const ext = path.extname(file.originalname).toLowerCase().replace('.', '')
+  const allowed = ['pdf', 'xml', 'zip', 'yml', 'yaml']
+  challengeUtils.solveIf(challenges.uploadTypeChallenge, () => !allowed.includes(ext))
+  next()
+}
+
+// Обработка XML без XXE
+function handleXmlUpload({ file }: Request, res: Response, next: NextFunction) {
+  if (!file || !file.originalname.toLowerCase().endsWith('.xml')) return next()
+  challengeUtils.solveIf(challenges.deprecatedInterfaceChallenge, () => true)
+
+  // Не используем `libxml.parseXml` с noent: true — потенциальный XXE
+  res.status(410)
+  next(new Error('B2B customer complaints via file upload have been deprecated for security reasons (' + file.originalname + ')'))
+}
+
+// Обработка YAML безопасно
+function handleYamlUpload({ file }: Request, res: Response, next: NextFunction) {
+  if (!file || (!file.originalname.toLowerCase().endsWith('.yml') && !file.originalname.toLowerCase().endsWith('.yaml'))) return next()
+  challengeUtils.solveIf(challenges.deprecatedInterfaceChallenge, () => true)
+
+  try {
+    const data = file.buffer.toString()
+    // Безопасная десериализация YAML
+    yaml.load(data, { schema: yaml.FAILSAFE_SCHEMA })
+  } catch (err) {
+    // В случае ошибки можно отмечать challenge yamlBombChallenge
+    if (challengeUtils.notSolved(challenges.yamlBombChallenge)) {
+      challengeUtils.solve(challenges.yamlBombChallenge)
     }
   }
-  res.status(204).end()
+
+  res.status(410)
+  next(new Error('B2B customer complaints via file upload have been deprecated for security reasons (' + file.originalname + ')'))
 }
 
 export {
