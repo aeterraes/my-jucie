@@ -15,15 +15,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Semgrep
-        uses: returntocorp/semgrep-action@v2
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v3
         with:
           config: auto
           output: semgrep-report.json
           format: json
 
       - name: Upload Semgrep report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep-report.json
