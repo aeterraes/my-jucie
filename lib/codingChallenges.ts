@@ -72,10 +72,23 @@ function getCodingChallengeFromFileContent (source: string, challengeKey: string
   if (lines.length === 1) lines = snippet.split('\r')
   const vulnLines = []
   const neutralLines = []
+  // базовая валидация (опционально, но рекомендуется)
+  if (!/^[a-zA-Z0-9-_]+$/.test(challengeKey)) {
+    throw new Error(`Invalid challengeKey: ${challengeKey}`)
+  }
+
   for (let i = 0; i < lines.length; i++) {
-    if (new RegExp(`vuln-code-snippet vuln-line.*${challengeKey}`).exec(lines[i]) != null) {
+    const line = lines[i]
+
+    if (
+        line.includes('vuln-code-snippet vuln-line') &&
+        line.includes(challengeKey)
+    ) {
       vulnLines.push(i + 1)
-    } else if (new RegExp(`vuln-code-snippet neutral-line.*${challengeKey}`).exec(lines[i]) != null) {
+    } else if (
+        line.includes('vuln-code-snippet neutral-line') &&
+        line.includes(challengeKey)
+    ) {
       neutralLines.push(i + 1)
     }
   }

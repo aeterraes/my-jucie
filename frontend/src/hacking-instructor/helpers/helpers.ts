@@ -66,7 +66,7 @@ export function waitForInputToHaveValue(inputSelector: string, value: string, op
 export function setElementInnerHtmlSafe(selector: string, html: string) {
   const el = document.querySelector<HTMLElement>(selector)
   if (!el) return
-  el.innerHTML = DOMPurify.sanitize(html)
+  DOMPurify.sanitize(html, { ALLOWED_TAGS: [...] })
 }
 
 // JWT проверка безопасно
